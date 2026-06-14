@@ -1,4 +1,3 @@
-// import { supabase } from "@/app/lib/supabase";
 import { supabaseAdmin } from "@/app/lib/supabase-admin";
 import NextAuth from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
@@ -22,6 +21,8 @@ const handler = NextAuth({
         fullname: user.name,
         image: user.image,
         auth_type: 'google'
+      }, {
+        onConflict: "email" // if email exists, update instead of duplicate
       });
       console.log("Supabase response", response);
       return true; // returning true allows the sign in to proceed otherwise access denied page gets shown
