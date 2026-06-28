@@ -1,35 +1,35 @@
 "use client";
 
 import Navbar from "@/src/components/Navbar";
-import { createClient } from "@/src/lib/supabase/client";
+import type { ResumeAnalysisResponse } from "@/src/types/ats-analysis";
+import { MIN_JOB_DESCRIPTION_CHARS } from "@/src/lib/resume/constants";
+import { useRouter } from "next/navigation";
 import { useState, useRef, useCallback, FC } from "react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type UploadStatus = "idle" | "uploading" | "done" | "error";
 type BadgeColor = "indigo" | "green" | "red" | "slate";
-
 interface FileEntry {
     file: File;
     status: UploadStatus;
     progress: number;
     error: string;
 }
-
-interface SupabaseUploadResult {
-    path: string;
-}
-
-// ─── Upload function — wire to Supabase ─────────────────────────────────
-async function uploadToSupabase(file: File): Promise<SupabaseUploadResult> {
-    const supabase = createClient();
-    const { data, error } = await supabase.storage
-      .from("resumes")
-      .upload(`uploads/${Date.now()}_${file.name}`, file, {
-        cacheControl: "3600",
-        upsert: false,
-      });
-    if (error) throw error;
-    return data;
+// ─── Upload function — send to backend API ────────────────────────────────
+async function analyzeResume(file: File, jobDescription: string): Promise<ResumeAnalysisResponse> {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("jobDescription", jobDescription);
+    const response = await fetch("/api/resume/upload", {
+        method: "POST",
+        body: formData,
+        credentials: "same-origin",
+    });
+    const payload = (await response.json()) as ResumeAnalysisResponse & { error?: string };
+    if (!response.ok) {
+        throw new Error(payload.error ?? "Analysis failed.");
+    }
+    return payload;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -104,9 +104,9 @@ const FileRow: FC<FileRowProps> = ({ file, status, progress, error, onRemove }) 
         </div>
 
         <div className="flex-shrink-0 flex items-center gap-2">
-            {status === "idle" && <Badge label="Queued" color="slate" />}
-            {status === "uploading" && <Badge label="Uploading…" color="indigo" />}
-            {status === "done" && <Badge label="Uploaded" color="green" />}
+            {status === "idle" && <Badge label="Ready" color="slate" />}
+            {status === "uploading" && <Badge label="Analyzing…" color="indigo" />}
+            {status === "done" && <Badge label="Done" color="green" />}
             {status === "error" && <Badge label="Failed" color="red" />}
 
             {status !== "uploading" && (
@@ -127,11 +127,13 @@ const FileRow: FC<FileRowProps> = ({ file, status, progress, error, onRemove }) 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function ResumeUpload() {
+    const router = useRouter();
     const inputRef = useRef<HTMLInputElement>(null);
     const [dragging, setDragging] = useState<boolean>(false);
     const [files, setFiles] = useState<FileEntry[]>([]);
+    const [jobDescription, setJobDescription] = useState("");
     const [globalError, setGlobalError] = useState<string>("");
-
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
     // ── Validate ──────────────────────────────────────────────────────────────
     function validate(file: File): string | null {
         if (!ACCEPTED_TYPES.includes(file.type)) return "Only PDF, DOC, and DOCX files are accepted.";
@@ -148,7 +150,7 @@ export default function ResumeUpload() {
             const err = validate(file);
             next.push({ file, status: err ? "error" : "idle", progress: 0, error: err ?? "" });
         }
-        setFiles((prev) => [...prev, ...next]);
+        setFiles((prev) => [...prev.slice(-0), ...next].slice(-1));
     }
 
     function removeFile(name: string): void {
@@ -167,47 +169,59 @@ export default function ResumeUpload() {
         [files], // eslint-disable-line
     );
 
-    // ── Upload ────────────────────────────────────────────────────────────────
-    async function handleUpload(): Promise<void> {
-        const toUpload = files.filter((f) => f.status === "idle");
-        if (!toUpload.length) return;
+    const trimmedJd = jobDescription.trim();
+    const canAnalyze =
+        trimmedJd.length >= MIN_JOB_DESCRIPTION_CHARS &&
+        files.some((f) => f.status === "idle") &&
+        !isAnalyzing;
 
-        for (const item of toUpload) {
+    // ── Analyze ───────────────────────────────────────────────────────────────
+    async function handleAnalyze(): Promise<void> {
+        const trimmed = jobDescription.trim();
+        if (trimmed.length < MIN_JOB_DESCRIPTION_CHARS) {
+            setGlobalError(`Job description must be at least ${MIN_JOB_DESCRIPTION_CHARS} characters.`);
+            return;
+        }
+        const toAnalyze = files.find((f) => f.status === "idle");
+        if (!toAnalyze) return;
+        setGlobalError("");
+        setIsAnalyzing(true);
+        setFiles((prev) =>
+            prev.map((f) =>
+                f.file.name === toAnalyze.file.name
+                    ? { ...f, status: "uploading" as UploadStatus, progress: 0 }
+                    : f,
+            ),
+        );
+
+        const ticker = setInterval(() => {
             setFiles((prev) =>
-                prev.map((f) => f.file.name === item.file.name ? { ...f, status: "uploading" as UploadStatus, progress: 0 } : f)
+                prev.map((f) =>
+                    f.file.name === toAnalyze.file.name && f.status === "uploading"
+                        ? { ...f, progress: Math.min(f.progress + Math.random() * 15, 92) }
+                        : f,
+                ),
             );
+        }, 400);
 
-            const ticker = setInterval(() => {
-                setFiles((prev) =>
-                    prev.map((f) =>
-                        f.file.name === item.file.name && f.status === "uploading"
-                            ? { ...f, progress: Math.min(f.progress + Math.random() * 25, 90) }
-                            : f
-                    )
-                );
-            }, 300);
-
-            try {
-                await uploadToSupabase(item.file);
-                clearInterval(ticker);
-                setFiles((prev) =>
-                    prev.map((f) => f.file.name === item.file.name ? { ...f, status: "done" as UploadStatus, progress: 100 } : f)
-                );
-            } catch (err) {
-                clearInterval(ticker);
-                const message = err instanceof Error ? err.message : "Upload failed.";
-                setFiles((prev) =>
-                    prev.map((f) =>
-                        f.file.name === item.file.name ? { ...f, status: "error" as UploadStatus, error: message } : f
-                    )
-                );
-            }
+        try {
+            const result = await analyzeResume(toAnalyze.file, trimmed);
+            clearInterval(ticker);
+            router.push(`/results/${result.id}`);
+        } catch (err) {
+            clearInterval(ticker);
+            const message = err instanceof Error ? err.message : "Analysis failed.";
+            setFiles((prev) =>
+                prev.map((f) =>
+                    f.file.name === toAnalyze.file.name
+                        ? { ...f, status: "error" as UploadStatus, error: message }
+                        : f,
+                ),
+            );
+            setIsAnalyzing(false);
         }
     }
 
-    const idleCount = files.filter((f) => f.status === "idle").length;
-    const doneCount = files.filter((f) => f.status === "done").length;
-    const allDone = files.length > 0 && doneCount === files.length;
 
     // ─────────────────────────────────────────────────────────────────────────
     return (
@@ -222,10 +236,29 @@ export default function ResumeUpload() {
                         Resume Portal
                     </span>
                     <h1 className="text-4xl font-semibold text-slate-800 tracking-tight leading-tight">
-                        Upload your resume
+                        Analyze your resume
                     </h1>
                     <p className="mt-3 text-slate-400 text-base max-w-sm mx-auto leading-relaxed">
-                        Drop your file below and we'll take care of the rest. PDF, DOC, or DOCX — up to {MAX_MB} MB.
+                        Paste the job description and upload your resume for an ATS score and tailored feedback.
+                    </p>
+                </div>
+                <div className="w-full max-w-lg mb-4">
+                    <label htmlFor="job-description" className="block text-xs font-medium text-slate-500 mb-2">
+                        Job description
+                    </label>
+                    <textarea
+                        id="job-description"
+                        value={jobDescription}
+                        onChange={(e) => {
+                            setJobDescription(e.target.value);
+                            setGlobalError("");
+                        }}
+                        placeholder="Paste the full job description here..."
+                        rows={3}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-700 placeholder:text-slate-300 outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
+                    />
+                    <p className="mt-1 text-xs text-slate-400 text-right">
+                        {trimmedJd.length} / {MIN_JOB_DESCRIPTION_CHARS}+ characters required
                     </p>
                 </div>
 
@@ -255,7 +288,7 @@ export default function ResumeUpload() {
                         </div>
 
                         <p className="text-sm font-medium text-slate-600">
-                            {dragging ? "Release to add files" : "Drag files here, or click to browse"}
+                            {dragging ? "Release to add file" : "Drag file here, or click to browse"}
                         </p>
                         <p className="mt-1 text-xs text-slate-400">
                             {ACCEPTED_EXT.join(", ")} · max {MAX_MB} MB
@@ -264,7 +297,6 @@ export default function ResumeUpload() {
                         <input
                             ref={inputRef}
                             type="file"
-                            multiple
                             accept={ACCEPTED_EXT.join(",")}
                             className="hidden"
                             onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
@@ -299,37 +331,29 @@ export default function ResumeUpload() {
                         <div className="mt-5 flex items-center justify-between gap-3">
                             <button
                                 onClick={() => setFiles([])}
-                                className="text-xs text-slate-400 hover:text-slate-600 transition-colors underline underline-offset-2"
+                                disabled={isAnalyzing}
+                                className="text-xs text-slate-400 hover:text-slate-600 transition-colors underline underline-offset-2 disabled:opacity-50"
                             >
-                                Clear all
+                                Clear
                             </button>
-
-                            {allDone ? (
-                                <div className="flex items-center gap-2 text-green-500 text-sm font-medium">
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                                    </svg>
-                                    All files uploaded
-                                </div>
-                            ) : (
-                                <button
-                                    onClick={handleUpload}
-                                    disabled={idleCount === 0}
-                                    className={`
+                            <button
+                                onClick={handleAnalyze}
+                                disabled={!canAnalyze}
+                                className={`
                     flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold
                     transition-all duration-200
-                    ${idleCount > 0
-                                            ? "bg-indigo-500 hover:bg-indigo-600 text-white shadow-sm shadow-indigo-200 hover:shadow-indigo-300"
-                                            : "bg-slate-100 text-slate-300 cursor-not-allowed"
-                                        }
+                    ${canAnalyze
+                                        ? "bg-indigo-500 hover:bg-indigo-600 text-white shadow-sm shadow-indigo-200 hover:shadow-indigo-300"
+                                        : "bg-slate-100 text-slate-300 cursor-not-allowed"
+                                    }
                   `}
-                                >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 16V4m0 0L8 8m4-4l4 4M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1" />
-                                    </svg>
-                                    Upload {idleCount > 1 ? `${idleCount} files` : "file"}
-                                </button>
-                            )}
+                            >
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                {isAnalyzing ? "Analyzing…" : "Analyze resume"}
+                            </button>
+
                         </div>
                     )}
                 </div>

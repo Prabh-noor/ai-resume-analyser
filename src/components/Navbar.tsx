@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "../lib/supabase/client";
 import { User } from "@supabase/supabase-js";
+import Image from "next/image";
 
 function getInitials(name: string): string {
     return name
@@ -91,7 +92,7 @@ const Navbar = () => {
                     >
                         <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center">
                             {user.user_metadata.avatar_url ?
-                                <img src={user.user_metadata.avatar_url} className="rounded-full" />
+                                <Image src={user.user_metadata.avatar_url} width={32} height={32} className="rounded-full" alt="Profile" />
                                 :
                                 <span className="text-xs font-semibold text-indigo-600">
                                     {getInitials(user.user_metadata.full_name)}
